@@ -108,4 +108,15 @@ class StreamWindow(QWidget):
         self.today.value.setText(fmt_delta(s.today_net))
         self.today.value.setStyleSheet(self.today.value.styleSheet() + f"color:{rp_color(s.today_net)};")
         g = s.goal
-        self.today.sub.setText("GOAL DONE" if g.reached else f"GOAL +{g.goal:,}  ({int(g.fraction * 100)}%)")
+        ss = s.session
+        if g.reached:
+            self.today.sub.setText("GOAL DONE")
+        elif ss is not None and ss.state == "live":
+            tail = f"BEATEN +{ss.over:,}" if ss.over > 0 else f"{int(ss.fraction * 100)}%"
+            self.today.sub.setText(f"SESSION {fmt_delta(ss.net)} / +{ss.goal:,}  {tail}")
+        elif g.beaten and g.next_goal is not None:
+            self.today.sub.setText(f"GOAL BEATEN +{g.over:,}  NEW GOAL +{g.next_goal:,}")
+        elif g.beaten:
+            self.today.sub.setText(f"GOAL BEATEN +{g.over:,}")
+        else:
+            self.today.sub.setText(f"GOAL +{g.goal:,}  ({int(g.fraction * 100)}%)")

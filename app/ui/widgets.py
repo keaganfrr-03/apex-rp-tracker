@@ -68,26 +68,20 @@ def make_table(headers):
     return t
 
 
-def fill_matches(table, matches, start_rp, limit=None):
-    """Newest first. Shows match number of the day, time, RP change and RP after."""
-    running, per_day, rows = start_rp, {}, []
-    for m in matches:
-        running += m.delta
-        per_day[m.day] = per_day.get(m.day, 0) + 1
-        rows.append((m, per_day[m.day], running))
-    rows.reverse()
-    if limit:
-        rows = rows[:limit]
+def fill_matches(table, rows, start_rp):
+    """rows come from Database.recent_matches(): newest first, (match, number of the day, running total)."""
+    table.setUpdatesEnabled(False)
     table.setRowCount(len(rows))
-    for r, (m, n, after) in enumerate(rows):
+    for r, (m, n, run) in enumerate(rows):
         cells = [colored_item(m.played_at.strftime("%a %d %b"), align=Qt.AlignLeft),
                  colored_item(f"#{n}  {m.played_at:%H:%M}", align=Qt.AlignLeft),
                  colored_item(fmt_delta(m.delta), rp_color(m.delta)),
-                 colored_item(f"{after:,}"),
+                 colored_item(f"{start_rp + run:,}"),
                  colored_item(m.note, align=Qt.AlignLeft)]
         for c, it in enumerate(cells):
             table.setItem(r, c, it)
         table.item(r, 0).setData(Qt.UserRole, m.id)
+    table.setUpdatesEnabled(True)
 
 
 def selected_match_id(table):
@@ -237,3 +231,75 @@ class RankHero(QFrame):
             self.right.setText("")
             self.nxt.clear()
             self.to_next.setText("TOP RANK")
+
+
+def _ago(minutes: int) -> str:
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min ago"
+    return f"{minutes // 60}h {minutes % 60:02d}m ago"
+
+
+def _span(minutes: int) -> str:
+    return f"{minutes} min" if minutes < 60 else f"{minutes // 60}h {minutes % 60:02d}m"
+
+
+class SessionPanel(QFrame):
+    """The session you are playing now (or the last one), and the goal for it.
+    Sessions start and stop on their own; the button only forces a fresh one."""
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("card")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 10, 16, 10)
+        lay.setSpacing(4)
+        top = QHBoxLayout()
+        self.title = QLabel("SESSION")
+        self.title.setObjectName("cardTitle")
+        self.status = QLabel("")
+        self.status.setObjectName("cardSub")
+        self.button = QPushButton("New session")
+        self.button.setToolTip("End this session now. The next match you log starts a new one with a new goal.")
+        top.addWidget(self.title)
+        top.addWidget(self.status, 1)
+        top.addWidget(self.button)
+        self.headline = QLabel("")
+        self.headline.setStyleSheet("font-size:20px;font-weight:600;")
+        self.bar = make_bar()
+        lay.addLayout(top)
+        lay.addWidget(self.headline)
+        lay.addWidget(self.bar)
+
+    def set(self, ss):
+        goal = f"+{ss.goal:,}"
+        if ss.reached:
+            self.status.setText("Target reached")
+            self.headline.setText("No goal needed")
+            self.headline.setStyleSheet("font-size:20px;font-weight:600;color:#2ecc71;")
+            set_bar(self.bar, 1.0, "Target reached", "#2ecc71")
+            return
+        if ss.state == "none":
+            self.status.setText("No session yet today. It starts by itself with your next match.")
+            self.headline.setText(f"Goal for your first session: {goal}")
+            self.headline.setStyleSheet("font-size:20px;font-weight:600;")
+            set_bar(self.bar, 0.0, f"0 / {goal}")
+        elif ss.state == "live":
+            n = ss.count_today
+            self.status.setText(f"LIVE  -  session {n} today  -  last match {_ago(ss.minutes_since or 0)}")
+            self.headline.setText(f"{fmt_delta(ss.net)} RP in {ss.matches} match{'es' if ss.matches != 1 else ''}"
+                                  f"  -  {_span(ss.last.minutes)}")
+            self.headline.setStyleSheet(f"font-size:20px;font-weight:600;color:{rp_color(ss.net)};")
+            text = f"{fmt_delta(ss.net)} / {goal}"
+            if ss.over > 0:
+                text += f"  session goal beaten by +{ss.over:,}"
+            set_bar(self.bar, ss.fraction, text, "#2ecc71" if ss.fraction >= 1 else None)
+        else:
+            last = ss.last
+            self.status.setText(f"ENDED  -  stopped {_ago(ss.minutes_since or 0)}  "
+                                f"(last match {last.end:%H:%M}, {ss.count_today} session"
+                                f"{'s' if ss.count_today != 1 else ''} today)")
+            self.headline.setText(f"Last session {fmt_delta(last.net)} RP in {last.matches} "
+                                  f"match{'es' if last.matches != 1 else ''}  -  next goal {goal}")
+            self.headline.setStyleSheet("font-size:20px;font-weight:600;")
+            set_bar(self.bar, 0.0, f"next session goal {goal}")

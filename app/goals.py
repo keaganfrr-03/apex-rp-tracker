@@ -11,6 +11,12 @@ class GoalInfo:
     days_left: int       # season days left, counting today
     fraction: float      # today's progress towards the goal, 0..1
     reached: bool        # target already reached
+    over: int = 0        # RP gained above today's goal (0 until the goal is beaten)
+    next_goal: int | None = None   # per-day goal from tomorrow on, from your RP right now (None on the last day)
+
+    @property
+    def beaten(self) -> bool:
+        return self.over > 0
 
 
 def daily_goal(current_rp, today_net, target_rp, season_end: date, today: date) -> GoalInfo:
@@ -24,4 +30,31 @@ def daily_goal(current_rp, today_net, target_rp, season_end: date, today: date) 
         frac = 1.0 if reached else 0.0
     else:
         frac = max(0.0, min(1.0, today_net / goal))
-    return GoalInfo(goal, remaining_now, days_left, frac, reached)
+    over = max(0, today_net - goal) if goal > 0 else 0
+    days_after = days_left - 1
+    # Tomorrow's goal is worked out from the RP you have right now, so every RP above (or below)
+    # today's goal moves it straight away. It matches what the dashboard shows after midnight.
+    next_goal = math.ceil(remaining_now / days_after) if days_after >= 1 else None
+    return GoalInfo(goal, remaining_now, days_left, frac, reached, over, next_goal)
+
+
+def average_gain(daily_totals) -> int | None:
+    """Usual RP per played day: net RP over all days with matches. daily_totals = [(day, matches, net)]."""
+    totals = [net for _, _, net in daily_totals]
+    if not totals:
+        return None
+    return round(sum(totals) / len(totals))
+
+
+def session_goal(day_goal, today_net_before, rp_at_start, target_rp, days_left) -> int:
+    """RP to gain in a session that starts with `today_net_before` RP already gained today.
+
+    While today's goal is not done, it is simply what is left of it (so a second session is
+    smaller than the first). Once today's goal is done, it is a fresh goal worked out from your
+    RP at the start of the session, which gets smaller the higher you climb.
+    """
+    left_today = day_goal - today_net_before
+    if left_today > 0:
+        return left_today
+    remaining = max(0, target_rp - rp_at_start)
+    return math.ceil(remaining / max(1, days_left))
