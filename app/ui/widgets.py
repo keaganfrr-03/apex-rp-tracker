@@ -8,7 +8,7 @@ from ..calc import match_net
 from ..ranks import split_label
 from .badges import badge_pixmap, tier_color
 from ..parsing import parse_rp
-from .theme import NEUTRAL, fmt_delta, rp_color
+from .theme import ACCENT, GREEN, NEUTRAL, fmt_delta, rp_color
 
 
 class Card(QFrame):
@@ -16,8 +16,9 @@ class Card(QFrame):
         super().__init__()
         self.setObjectName("card")
         lay = QVBoxLayout(self)
-        lay.setContentsMargins(16, 12, 16, 12)
-        lay.setSpacing(2)
+        lay.setContentsMargins(16, 13, 16, 13)
+        lay.setSpacing(3)
+        self._accent = None
         self.title = QLabel(title)
         self.title.setObjectName("cardTitle")
         self.value = QLabel("-")
@@ -29,12 +30,17 @@ class Card(QFrame):
 
     def set(self, value, sub="", color=None):
         self.value.setText(value)
-        self.value.setStyleSheet(f"color:{color or '#e6e9ef'};")
+        self.value.setStyleSheet(f"color:{color or '#e9ebef'};")
         self.sub.setText(sub)
+        accent = color or ACCENT                      # the left edge follows green / red
+        if accent != self._accent:
+            self._accent = accent
+            self.setStyleSheet(f"QFrame#card {{ border-left:3px solid {accent}; }}")
 
 
 def make_bar(fmt="%p%"):
     b = QProgressBar()
+    b.setMinimumHeight(20)
     b.setRange(0, 1000)
     b.setFormat(fmt)
     return b
@@ -44,8 +50,8 @@ def set_bar(bar, fraction, fmt=None, color=None):
     bar.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
     if fmt is not None:
         bar.setFormat(fmt)
-    c = color or "#e8453c"
-    bar.setStyleSheet(f"QProgressBar::chunk {{ background:{c}; border-radius:6px; }}")
+    c = color or ACCENT
+    bar.setStyleSheet(f"QProgressBar::chunk {{ background:{c}; border-radius:8px; }}")
 
 
 def colored_item(text, color=None, align=Qt.AlignRight):
@@ -60,6 +66,8 @@ def make_table(headers):
     t = QTableWidget(0, len(headers))
     t.setHorizontalHeaderLabels(headers)
     t.setAlternatingRowColors(True)
+    t.setShowGrid(False)
+    t.verticalHeader().setDefaultSectionSize(32)
     t.setSelectionBehavior(QAbstractItemView.SelectRows)
     t.setSelectionMode(QAbstractItemView.SingleSelection)
     t.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -68,26 +76,20 @@ def make_table(headers):
     return t
 
 
-def fill_matches(table, matches, start_rp, limit=None):
-    """Newest first. Shows match number of the day, time, RP change and RP after."""
-    running, per_day, rows = start_rp, {}, []
-    for m in matches:
-        running += m.delta
-        per_day[m.day] = per_day.get(m.day, 0) + 1
-        rows.append((m, per_day[m.day], running))
-    rows.reverse()
-    if limit:
-        rows = rows[:limit]
+def fill_matches(table, rows, start_rp):
+    """rows come from Database.recent_matches(): newest first, (match, number of the day, running total)."""
+    table.setUpdatesEnabled(False)
     table.setRowCount(len(rows))
-    for r, (m, n, after) in enumerate(rows):
+    for r, (m, n, run) in enumerate(rows):
         cells = [colored_item(m.played_at.strftime("%a %d %b"), align=Qt.AlignLeft),
                  colored_item(f"#{n}  {m.played_at:%H:%M}", align=Qt.AlignLeft),
                  colored_item(fmt_delta(m.delta), rp_color(m.delta)),
-                 colored_item(f"{after:,}"),
+                 colored_item(f"{start_rp + run:,}"),
                  colored_item(m.note, align=Qt.AlignLeft)]
         for c, it in enumerate(cells):
             table.setItem(r, c, it)
         table.item(r, 0).setData(Qt.UserRole, m.id)
+    table.setUpdatesEnabled(True)
 
 
 def selected_match_id(table):
@@ -101,7 +103,10 @@ class EditMatchDialog(QDialog):
     def __init__(self, match, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Edit match")
+        self.setMinimumWidth(380)
         form = QFormLayout(self)
+        form.setContentsMargins(20, 18, 20, 18)
+        form.setVerticalSpacing(12)
         self.delta = QLineEdit(fmt_delta(match.delta))
         self.note = QLineEdit(match.note)
         self.when = QDateTimeEdit(match.played_at)
@@ -131,7 +136,10 @@ class CalculatorDialog(QDialog):
     def __init__(self, parent=None, entry_cost=0):
         super().__init__(parent)
         self.setWindowTitle("Match calculator")
+        self.setMinimumWidth(420)
         form = QFormLayout(self)
+        form.setContentsMargins(20, 18, 20, 18)
+        form.setVerticalSpacing(10)
         self.fields = {}
         for key, label in (("kills", "Kills RP"), ("assists", "Assists RP"),
                            ("participation", "Participation RP"), ("placement", "Placement RP"),
@@ -146,10 +154,11 @@ class CalculatorDialog(QDialog):
         self.place.setPlaceholderText("Placement, e.g. 8 (for the note)")
         form.addRow("Placement #", self.place)
         self.total = QLabel("")
-        self.total.setStyleSheet("font-size:22px;font-weight:600;")
+        self.total.setStyleSheet("font-size:26px;font-weight:700;")
         form.addRow("Net RP", self.total)
         bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         bb.button(QDialogButtonBox.Ok).setText("Add match")
+        bb.button(QDialogButtonBox.Ok).setObjectName("primary")
         bb.accepted.connect(self.accept)
         bb.rejected.connect(self.reject)
         form.addRow(bb)
@@ -168,7 +177,7 @@ class CalculatorDialog(QDialog):
     def _update(self):
         n = self.net()
         self.total.setText(fmt_delta(n))
-        self.total.setStyleSheet(f"font-size:22px;font-weight:600;color:{rp_color(n)};")
+        self.total.setStyleSheet(f"font-size:26px;font-weight:700;color:{rp_color(n)};")
 
 
 class RankHero(QFrame):
@@ -177,8 +186,9 @@ class RankHero(QFrame):
         super().__init__()
         self.setObjectName("hero")
         row = QHBoxLayout(self)
-        row.setContentsMargins(18, 12, 18, 12)
-        row.setSpacing(18)
+        row.setContentsMargins(20, 14, 20, 14)
+        row.setSpacing(20)
+        self._edge = None
         self.cur = QLabel()
         self.cur.setFixedSize(112, 112)
         mid = QVBoxLayout()
@@ -222,6 +232,9 @@ class RankHero(QFrame):
             self.caption.setText("RANKED POINTS GAINED" if last_delta > 0 else
                                  "RANKED POINTS LOST" if last_delta < 0 else "NO RP CHANGE")
         color = tier_color(r.tier)
+        if color != self._edge:
+            self._edge = color
+            self.setStyleSheet(f"QFrame#hero {{ border-left:3px solid {color}; }}")
         if r.next_rp:
             into, size = s.current_rp - r.start_rp, r.next_rp - r.start_rp
             set_bar(self.bar, r.fraction, "", color)
@@ -237,3 +250,76 @@ class RankHero(QFrame):
             self.right.setText("")
             self.nxt.clear()
             self.to_next.setText("TOP RANK")
+
+
+def _ago(minutes: int) -> str:
+    if minutes < 1:
+        return "just now"
+    if minutes < 60:
+        return f"{minutes} min ago"
+    return f"{minutes // 60}h {minutes % 60:02d}m ago"
+
+
+def _span(minutes: int) -> str:
+    return f"{minutes} min" if minutes < 60 else f"{minutes // 60}h {minutes % 60:02d}m"
+
+
+class SessionPanel(QFrame):
+    """The session you are playing now (or the last one), and the goal for it.
+    Sessions start and stop on their own; the button only forces a fresh one."""
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("card")
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(6)
+        top = QHBoxLayout()
+        self.title = QLabel("SESSION")
+        self.title.setObjectName("cardTitle")
+        self.status = QLabel("")
+        self.status.setObjectName("cardSub")
+        self.button = QPushButton("New session")
+        self.button.setToolTip("End this session now. The next match you log starts a new one with a new goal.")
+        top.addWidget(self.title)
+        top.addWidget(self.status, 1)
+        top.addWidget(self.button)
+        self.headline = QLabel("")
+        self.headline.setStyleSheet("font-size:20px;font-weight:600;")
+        self.bar = make_bar()
+        lay.addLayout(top)
+        lay.addWidget(self.headline)
+        lay.addWidget(self.bar)
+
+    def set(self, ss):
+        goal = f"+{ss.goal:,}"
+        usual = f"  -  usual session {fmt_delta(ss.avg_net)}" if ss.avg_net is not None else ""
+        if ss.reached:
+            self.status.setText("Target reached")
+            self.headline.setText("No goal needed")
+            self.headline.setStyleSheet(f"font-size:20px;font-weight:600;color:{GREEN};")
+            set_bar(self.bar, 1.0, "Target reached", "#2ecc71")
+            return
+        if ss.state == "none":
+            self.status.setText("No session yet today. It starts by itself with your next match." + usual)
+            self.headline.setText(f"Goal for your first session: {goal}")
+            self.headline.setStyleSheet("font-size:20px;font-weight:600;")
+            set_bar(self.bar, 0.0, f"0 / {goal}")
+        elif ss.state == "live":
+            n = ss.count_today
+            self.status.setText(f"LIVE  -  session {n} today  -  last match {_ago(ss.minutes_since or 0)}" + usual)
+            self.headline.setText(f"{fmt_delta(ss.net)} RP in {ss.matches} match{'es' if ss.matches != 1 else ''}"
+                                  f"  -  {_span(ss.last.minutes)}")
+            self.headline.setStyleSheet(f"font-size:20px;font-weight:600;color:{rp_color(ss.net)};")
+            text = f"{fmt_delta(ss.net)} / {goal}"
+            if ss.over > 0:
+                text += f"  session goal beaten by +{ss.over:,}"
+            set_bar(self.bar, ss.fraction, text, "#2ecc71" if ss.fraction >= 1 else None)
+        else:
+            last = ss.last
+            self.status.setText(f"ENDED  -  stopped {_ago(ss.minutes_since or 0)}  "
+                                f"(last match {last.end:%H:%M}, {ss.count_today} session"
+                                f"{'s' if ss.count_today != 1 else ''} today)" + usual)
+            self.headline.setText(f"Last session {fmt_delta(last.net)} RP in {last.matches} "
+                                  f"match{'es' if last.matches != 1 else ''}  -  next goal {goal}")
+            self.headline.setStyleSheet("font-size:20px;font-weight:600;")
+            set_bar(self.bar, 0.0, f"next session goal {goal}")

@@ -1,9 +1,10 @@
 import os
+import sqlite3
 from datetime import datetime
 
 from PySide6.QtCore import QDate, QTimer, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QFormLayout, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QFormLayout, QFrame, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QMainWindow, QMessageBox,
                                QPushButton, QSpinBox, QSplitter, QTabWidget, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget, QGridLayout, QHeaderView)
@@ -11,12 +12,11 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QFormLayout, QHB
 from .. import paths
 from ..db import Database
 from ..parsing import parse_rp
-from ..ranks import target_options
+from ..ranks import target_options, validate_ladder
 from ..tracker import Tracker
-from .theme import AMBER, GREEN, NEUTRAL, STYLE, fmt_delta, rp_color
-from .stream import StreamWindow
-from .widgets import (CalculatorDialog, Card, EditMatchDialog, RankHero, colored_item, fill_matches, make_bar, make_table,
-                      selected_match_id, set_bar)
+from .theme import GREEN, RED, STYLE, MUTED, fmt_delta, rp_color
+from .widgets import (CalculatorDialog, Card, EditMatchDialog, RankHero, SessionPanel, colored_item, fill_matches,
+                      make_bar, make_table, selected_match_id, set_bar)
 
 
 class Dashboard(QWidget):
@@ -24,24 +24,22 @@ class Dashboard(QWidget):
         super().__init__()
         self.win = win
         root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
         root.setSpacing(12)
 
         head = QHBoxLayout()
-        title = QLabel("Apex RP Tracker")
-        title.setStyleSheet("font-size:20px;font-weight:600;")
+        title = QLabel("APEX <span style='color:#e8453c'>RP</span> TRACKER")
+        title.setObjectName("appTitle")
         self.date_lbl = QLabel("")
         self.date_lbl.setObjectName("cardSub")
         head.addWidget(title)
         head.addStretch()
         head.addWidget(self.date_lbl)
+        head.addSpacing(8)
         stream = QPushButton("Stream mode")
         stream.clicked.connect(self.win.open_stream)
         head.addWidget(stream)
         root.addLayout(head)
-        self.warn = QLabel("")
-        self.warn.setObjectName("warn")
-        self.warn.setWordWrap(True)
-        root.addWidget(self.warn)
 
         self.hero = RankHero()
         root.addWidget(self.hero)
@@ -49,8 +47,8 @@ class Dashboard(QWidget):
         grid = QGridLayout()
         grid.setSpacing(10)
         self.c_rp, self.c_today = Card("CURRENT RP"), Card("TODAY")
-        self.c_goal, self.c_target = Card("DAILY GOAL"), Card("TARGET")
-        for i, c in enumerate((self.c_rp, self.c_today, self.c_goal, self.c_target)):
+        self.c_goal, self.c_avg, self.c_target = Card("DAILY GOAL"), Card("USUAL / DAY"), Card("TARGET")
+        for i, c in enumerate((self.c_rp, self.c_today, self.c_goal, self.c_avg, self.c_target)):
             grid.addWidget(c, 0, i)
         root.addLayout(grid)
 
@@ -58,16 +56,28 @@ class Dashboard(QWidget):
         for text, bar in (("Today's goal", self.bar_goal), ("Progress to target", self.bar_target)):
             row = QHBoxLayout()
             lbl = QLabel(text)
-            lbl.setFixedWidth(170)
+            lbl.setObjectName("barLabel")
+            lbl.setFixedWidth(150)
             row.addWidget(lbl)
             row.addWidget(bar)
             root.addLayout(row)
 
-        entry = QHBoxLayout()
+        self.session = SessionPanel()
+        self.session.button.clicked.connect(self.new_session)
+        root.addWidget(self.session)
+        self.stats = QLabel("")
+        self.stats.setObjectName("cardSub")
+        root.addWidget(self.stats)
+
+        entry_box = QFrame()
+        entry_box.setObjectName("entryBar")
+        entry = QHBoxLayout(entry_box)
+        entry.setContentsMargins(12, 10, 12, 10)
+        entry.setSpacing(8)
         self.delta = QLineEdit()
         self.delta.setPlaceholderText("+125 or -45")
         self.delta.setMinimumWidth(170)
-        self.delta.setStyleSheet("font-size:18px;padding:9px 11px;")
+        self.delta.setStyleSheet("font-size:18px;font-weight:600;padding:8px 11px;")
         self.delta.returnPressed.connect(self.add)
         self.note = QLineEdit()
         self.note.setPlaceholderText("Note (optional)")
@@ -87,12 +97,17 @@ class Dashboard(QWidget):
         entry.addWidget(undo)
         entry.addWidget(calc)
         entry.addWidget(sync)
-        root.addLayout(entry)
+        root.addWidget(entry_box)
         self.err = QLabel("")
-        self.err.setStyleSheet("color:#ff5252;")
+        self.err.setStyleSheet(f"color:{RED};")
         root.addWidget(self.err)
+        self.saved = QLabel("")
+        self.saved.setObjectName("cardSub")
+        root.addWidget(self.saved)
 
-        root.addWidget(QLabel("Recent matches"))
+        recent = QLabel("RECENT MATCHES  (double-click to edit)")
+        recent.setObjectName("section")
+        root.addWidget(recent)
         self.table = make_table(["Date", "Match", "RP", "RP after", "Note"])
         self.table.doubleClicked.connect(self.edit_selected)
         root.addWidget(self.table, 1)
@@ -104,7 +119,8 @@ class Dashboard(QWidget):
             self.err.setText(str(e))
             return
         self.err.setText("")
-        self.win.tracker.db.add_match(d, self.note.text())
+        if not self.win.guard(self.win.tracker.db.add_match, d, self.note.text()):
+            return                                   # not saved: keep what you typed so you can try again
         self.delta.clear()
         self.note.clear()
         self.delta.setFocus()
@@ -113,7 +129,7 @@ class Dashboard(QWidget):
     def calculator(self):
         dlg = CalculatorDialog(self, entry_cost=self.win.tracker.snapshot().entry_cost)
         if dlg.exec():
-            self.win.tracker.db.add_match(dlg.net(), dlg.note())
+            self.win.guard(self.win.tracker.db.add_match, dlg.net(), dlg.note())
             self.win.refresh()
 
     def undo(self):
@@ -122,15 +138,19 @@ class Dashboard(QWidget):
             return
         if QMessageBox.question(self, "Undo last match",
                                 f"Delete the last match ({fmt_delta(last.delta)} RP)?") == QMessageBox.Yes:
-            self.win.tracker.db.delete_match(last.id)
+            self.win.guard(self.win.tracker.db.delete_match, last.id)
             self.win.refresh()
+
+    def new_session(self):
+        self.win.guard(self.win.tracker.new_session)
+        self.win.refresh()
 
     def sync_rp(self):
         cur = self.win.tracker.current_rp()
         v, ok = QInputDialog.getInt(self, "Set current RP",
                                     "Your RP in game right now (history is kept):", cur, 0, 100000)
         if ok:
-            self.win.tracker.set_current_rp(v)
+            self.win.guard(self.win.tracker.set_current_rp, v)
             self.win.refresh()
 
     def edit_selected(self):
@@ -138,24 +158,50 @@ class Dashboard(QWidget):
 
     def refresh(self, s):
         self.date_lbl.setText(s.day.strftime("%A %d %B %Y"))
-        self.warn.setText("" if s.thresholds_verified else
-                          "Rank ladder not confirmed in game yet. Check it in Settings. " + s.thresholds_note)
         self.c_rp.set(f"{s.current_rp:,}", s.rank.label)
-        self.c_today.set(fmt_delta(s.today_net), f"{s.today_count} matches today", rp_color(s.today_net))
+        n_sess = s.session.count_today
+        self.c_today.set(fmt_delta(s.today_net),
+                         f"{s.today_count} matches, {n_sess} session{'s' if n_sess != 1 else ''}",
+                         rp_color(s.today_net))
+        self.session.set(s.session)
+        st = s.today_stats
+        self.stats.setText("No matches yet today." if st is None else
+                           f"Today: {st.ups} up, {st.downs} down  -  average {fmt_delta(st.avg)} per match"
+                           f"  -  best {fmt_delta(st.best)}, worst {fmt_delta(st.worst)}")
         g = s.goal
         if g.reached:
             self.c_goal.set("Done", "Target reached", GREEN)
+        elif g.beaten and g.next_goal is not None:
+            # Gained more than today's goal: the per-day goal drops to the new, lower figure straight away.
+            self.c_goal.set(f"+{g.next_goal:,}", f"new goal/day, +{g.over:,} over", GREEN)
+        elif g.beaten:
+            self.c_goal.set(f"+{g.goal:,}", f"beaten by +{g.over:,} (last day)", GREEN)
         else:
             self.c_goal.set(f"+{g.goal:,}", f"{g.days_left} season days left")
+        if s.avg_per_day is None:
+            self.c_avg.set("-", "no matches yet")
+        else:
+            self.c_avg.set(fmt_delta(s.avg_per_day), f"average over {s.avg_days} day{'s' if s.avg_days != 1 else ''}",
+                           rp_color(s.avg_per_day))
         self.c_target.set(s.target_label, f"{g.remaining:,} RP to go" if not g.reached else "Reached", None)
-        set_bar(self.bar_goal, g.fraction,
-                f"{fmt_delta(s.today_net)} / +{g.goal:,}" if not g.reached else "Target reached",
-                GREEN if g.fraction >= 1 else None)
+        if g.reached:
+            bar_text = "Target reached"
+        elif g.beaten:
+            bar_text = f"{fmt_delta(s.today_net)} / +{g.goal:,}  goal beaten by +{g.over:,}"
+        else:
+            bar_text = f"{fmt_delta(s.today_net)} / +{g.goal:,}"
+        if not g.reached and g.next_goal is not None:
+            bar_text += f"   |   tomorrow's goal +{g.next_goal:,}"
+        set_bar(self.bar_goal, g.fraction, bar_text, GREEN if g.fraction >= 1 else None)
         last = self.win.tracker.db.last_match()
         self.hero.set(s, last.delta if last else None)
-        set_bar(self.bar_target, s.current_rp / s.target_rp if s.target_rp else 1.0,
-                f"{s.current_rp:,} / {s.target_rp:,}")
-        fill_matches(self.table, self.win.tracker.db.list_matches(), s.start_rp, limit=10)
+        target_text = f"{s.current_rp:,} / {s.target_rp:,}"
+        p = s.projection
+        if p is not None:
+            when = f"{abs(p.days_early)} day{'s' if abs(p.days_early) != 1 else ''} {'early' if p.days_early >= 0 else 'too late'}"
+            target_text += f"   |   at {fmt_delta(s.avg_per_day)}/day you reach {s.target_label} on {p.finish:%d %b} ({when})"
+        set_bar(self.bar_target, s.current_rp / s.target_rp if s.target_rp else 1.0, target_text)
+        fill_matches(self.table, self.win.tracker.db.recent_matches(10), s.start_rp)
 
 
 class History(QWidget):
@@ -163,8 +209,11 @@ class History(QWidget):
         super().__init__()
         self.win = win
         root = QHBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
         left, right = QVBoxLayout(), QVBoxLayout()
-        left.addWidget(QLabel("All matches (double-click to edit)"))
+        left.setSpacing(8)
+        right.setSpacing(8)
+        left.addWidget(self._section("ALL MATCHES  (double-click to edit)"))
         self.table = make_table(["Date", "Match", "RP", "RP after", "Note"])
         self.table.doubleClicked.connect(self.edit)
         left.addWidget(self.table)
@@ -177,9 +226,12 @@ class History(QWidget):
         btns.addWidget(d)
         btns.addStretch()
         left.addLayout(btns)
-        right.addWidget(QLabel("Daily totals"))
+        right.addWidget(self._section("DAILY TOTALS"))
         self.days = make_table(["Day", "Matches", "Net RP"])
         right.addWidget(self.days)
+        right.addWidget(self._section("SESSIONS  (new one after a break)"))
+        self.sessions = make_table(["Day / time", "Matches", "Net RP"])
+        right.addWidget(self.sessions)
         lw, rw = QWidget(), QWidget()
         lw.setLayout(left)
         rw.setLayout(right)
@@ -190,6 +242,12 @@ class History(QWidget):
         sp.setStretchFactor(1, 1)
         root.addWidget(sp)
 
+    @staticmethod
+    def _section(text):
+        lbl = QLabel(text)
+        lbl.setObjectName("section")
+        return lbl
+
     def edit(self):
         self.win.edit_match(selected_match_id(self.table))
 
@@ -198,11 +256,17 @@ class History(QWidget):
         if mid is None:
             return
         if QMessageBox.question(self, "Delete match", "Delete the selected match?") == QMessageBox.Yes:
-            self.win.tracker.db.delete_match(mid)
+            self.win.guard(self.win.tracker.db.delete_match, mid)
             self.win.refresh()
 
     def refresh(self, s):
-        fill_matches(self.table, self.win.tracker.db.list_matches(), s.start_rp)
+        fill_matches(self.table, self.win.tracker.db.recent_matches(), s.start_rp)
+        sess = list(reversed(self.win.tracker.all_sessions()))
+        self.sessions.setRowCount(len(sess))
+        for r, x in enumerate(sess):
+            self.sessions.setItem(r, 0, colored_item(f"{x.start:%d %b}  {x.start:%H:%M}-{x.end:%H:%M}", align=Qt.AlignLeft))
+            self.sessions.setItem(r, 1, colored_item(str(x.matches)))
+            self.sessions.setItem(r, 2, colored_item(fmt_delta(x.net), rp_color(x.net)))
         totals = self.win.tracker.db.daily_totals()
         self.days.setRowCount(len(totals))
         for r, (day, n, net) in enumerate(totals):
@@ -216,20 +280,33 @@ class Settings(QWidget):
         super().__init__()
         self.win = win
         root = QVBoxLayout(self)
+        root.setContentsMargins(20, 16, 20, 16)
+        root.setSpacing(10)
         form = QFormLayout()
+        form.setVerticalSpacing(10)
+        form.setHorizontalSpacing(16)
         self.start = QSpinBox()
         self.start.setRange(0, 100000)
-        self.start.setToolTip("Your RP before the first match you logged.")
+        self.start.setToolTip("Your RP right now. Only change this if it does not match the game.")
+        self._synced_rp = 0
         self.target = QComboBox()
         self.season_end = QDateEdit()
         self.season_end.setCalendarPopup(True)
         self.season_end.setDisplayFormat("yyyy-MM-dd")
-        form.addRow("Starting RP (before first logged match)", self.start)
+        form.addRow("Current RP (change only if it is wrong)", self.start)
         form.addRow("Target rank", self.target)
         form.addRow("Season end date", self.season_end)
+        self.gap = QSpinBox()
+        self.gap.setRange(5, 600)
+        self.gap.setSuffix(" min")
+        self.gap.setToolTip("If you do not log a match for this long, the session counts as ended "
+                            "and your next match starts a new one with a new goal.")
+        form.addRow("New session after this long without a match", self.gap)
         root.addLayout(form)
 
-        root.addWidget(QLabel("Rank ladder: RP where each division starts, and entry cost per match"))
+        ladder_lbl = QLabel("RANK LADDER  -  RP where each division starts, and entry cost per match")
+        ladder_lbl.setObjectName("section")
+        root.addWidget(ladder_lbl)
         tables = QHBoxLayout()
         self.thr = QTableWidget(0, 3)
         self.thr.setHorizontalHeaderLabels(["Division", "Starts at RP", "RP to next"])
@@ -262,8 +339,18 @@ class Settings(QWidget):
             row.addWidget(b_)
         root.addLayout(row)
         self.msg = QLabel("")
+        self.msg.setObjectName("cardSub")
         root.addWidget(self.msg)
         self.load()
+
+    def sync_rp(self, rp):
+        """Keep the box equal to the real RP, so saving other settings can never overwrite it."""
+        if self.start.hasFocus():
+            return
+        self.start.blockSignals(True)
+        self.start.setValue(int(rp))
+        self.start.blockSignals(False)
+        self._synced_rp = int(rp)
 
     def _fill_targets(self, ladder, selected):
         self.target.clear()
@@ -300,8 +387,9 @@ class Settings(QWidget):
 
     def load(self):
         t = self.win.tracker
-        self.start.setValue(t.start_rp)
+        self.sync_rp(t.current_rp())
         self.season_end.setDate(QDate(t.season_end.year, t.season_end.month, t.season_end.day))
+        self.gap.setValue(t.session_gap_min)
         self._fill_ladder(t.ladder)
         self._fill_targets(t.ladder, t.db.get_setting("target_label"))
         costs = t.entry_costs
@@ -335,11 +423,17 @@ class Settings(QWidget):
     def save(self):
         try:
             ladder = self._read_ladder()
-            self.win.tracker.save_settings(
-                start_rp=self.start.value(), season_end=self.season_end.date().toPython(),
+            costs = self._read_costs()
+            validate_ladder(ladder)
+            t = self.win.tracker
+            if self.start.value() != self._synced_rp:      # only touch RP if you actually changed it
+                t.set_current_rp(self.start.value())
+            t.save_settings(
+                start_rp=t.start_rp, season_end=self.season_end.date().toPython(),
                 target_label=self.target.currentData() or "", ladder=ladder,
                 note=self.thr_note.text(), verified=self.verified.isChecked(),
-                entry_costs=self._read_costs())
+                entry_costs=costs)
+            t.set_session_gap(self.gap.value())
         except ValueError as e:
             QMessageBox.warning(self, "Check the settings", str(e))
             return
@@ -353,23 +447,25 @@ class Settings(QWidget):
         self.load()
 
     def backup(self):
-        p = self.win.tracker.db.backup(paths.backup_dir())
+        p = self.win.tracker.db.backup(self.win.backup_dir)
         self.msg.setText(f"Backup saved: {p}")
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, db_file=None, first_run_prompt=True):
+    def __init__(self, db_file=None):
         super().__init__()
-        self.setWindowTitle("Apex RP Tracker v4")
-        self.resize(1040, 900)
+        self.setWindowTitle("Apex RP Tracker v10")
+        self.resize(1080, 900)
         self.setStyleSheet(STYLE)
         self.db = Database(db_file or paths.db_path())
         self.tracker = Tracker(self.db)
-        if not self.db.has_backup_today(paths.backup_dir() if db_file is None else self.db.path.parent / "backups"):
-            self.db.backup(paths.backup_dir() if db_file is None else self.db.path.parent / "backups")
+        self.backup_dir = paths.backup_dir() if db_file is None else self.db.path.parent / "backups"
+        if not self.db.has_backup_today(self.backup_dir):
+            self.db.backup(self.backup_dir)
 
         self.dash, self.hist, self.sett = Dashboard(self), History(self), Settings(self)
         self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
         self.tabs.addTab(self.dash, "Dashboard")
         self.tabs.addTab(self.hist, "History")
         self.tabs.addTab(self.sett, "Settings")
@@ -377,34 +473,68 @@ class MainWindow(QMainWindow):
 
         self.stream = None
         self._day = datetime.now().date()
-        self.timer = QTimer(self)             # notices midnight and rolls "today" over
+        self.timer = QTimer(self)             # only wakes up to notice midnight and roll "today" over
         self.timer.timeout.connect(self._tick)
-        self.timer.start(15000)
+        self.timer.start(30000)
         self.refresh()
-        if first_run_prompt and self.db.get_setting("setup_done") != "1":
-            QTimer.singleShot(0, self._first_run)
-
-    def _first_run(self):
-        self.tabs.setCurrentWidget(self.sett)
-        QMessageBox.information(self, "Welcome",
-                                "Set your starting RP, target rank and season end date, then check the "
-                                "rank thresholds against the game and click Save.")
 
     def _tick(self):
+        """Every 30 s: roll over at midnight, and let the session notice that you stopped playing."""
         today = datetime.now().date()
         if today != self._day:
             self._day = today
-        self.refresh()
+            self.refresh()
+            return
+        try:
+            s = self.tracker.snapshot(today)
+        except sqlite3.Error:
+            return
+        self.dash.session.set(s.session)
+        if self.stream is not None:
+            self.stream.refresh(s)
+
+    def guard(self, fn, *args):
+        """Run a save. If the disk refuses, say so loudly instead of crashing or losing it quietly."""
+        try:
+            fn(*args)
+            return True
+        except sqlite3.Error as e:
+            QMessageBox.critical(self, "NOT SAVED",
+                                 f"That change could not be saved:\n{e}\n\nNothing was lost that was saved before. "
+                                 "Check that the data folder is not full or read-only, then try again.")
+            return False
+
+    def new_session(self):
+        self.dash.new_session()
+
+    def confirm_saved(self):
+        """Read the total back with a separate connection: proof it is really on disk."""
+        try:
+            ok = self.db.disk_total() == self.db.total_delta()
+        except (sqlite3.Error, OSError, ValueError):
+            ok = None                          # the extra check itself failed: do not raise a false alarm
+        if ok is None:
+            self.dash.saved.setText(f"Saved {datetime.now():%H:%M:%S}  -  {self.tracker.current_rp():,} RP")
+            self.dash.saved.setStyleSheet(f"color:{MUTED};background:transparent;")
+        elif ok:
+            self.dash.saved.setText(f"Saved to disk {datetime.now():%H:%M:%S}  -  {self.tracker.current_rp():,} RP")
+            self.dash.saved.setStyleSheet(f"color:{GREEN};background:transparent;")
+        else:
+            self.dash.saved.setText("NOT SAVED - could not confirm the data on disk. Check the data folder.")
+            self.dash.saved.setStyleSheet(f"color:{RED};background:transparent;")
 
     def refresh(self):
         s = self.tracker.snapshot(datetime.now().date())
         self.dash.refresh(s)
         self.hist.refresh(s)
+        self.sett.sync_rp(s.current_rp)
         if self.stream is not None:
             self.stream.refresh(s)
+        self.confirm_saved()
 
     def open_stream(self):
         if self.stream is None:
+            from .stream import StreamWindow      # loaded on first use, keeps start-up quick
             self.stream = StreamWindow()
         self.stream.refresh(self.tracker.snapshot(datetime.now().date()))
         self.stream.show()
@@ -419,11 +549,16 @@ class MainWindow(QMainWindow):
         dlg = EditMatchDialog(m, self)
         if dlg.exec() and dlg.result_values:
             d, note, when = dlg.result_values
-            self.db.update_match(match_id, d, note, when)
+            self.guard(self.db.update_match, match_id, d, note, when)
             self.refresh()
 
     def closeEvent(self, e):
+        self.timer.stop()
         if self.stream is not None:
             self.stream.close()
+        try:                                  # one more backup every time you close the app
+            self.db.backup(self.backup_dir)
+        except (sqlite3.Error, OSError):
+            pass
         self.db.close()
         super().closeEvent(e)

@@ -80,7 +80,7 @@ class StreamWindow(QWidget):
         bg = "#00b140" if self._green else "#0b0c0f"
         self.setStyleSheet(
             f"QWidget {{ background:{bg}; color:#f2f2f2; font-family:'Bahnschrift','Segoe UI',sans-serif; }}"
-            f"QFrame#panel {{ background:#14161b; border:1px solid #6b2323; border-left:4px solid #e8453c; }}")
+            f"QFrame#panel {{ background:#14161b; border:1px solid #6b2323; border-left:4px solid #e8453c; border-radius:6px; }}")
         for pnl in (self.cur, self.tgt, self.today):
             pnl.title.setStyleSheet(f"background:transparent;color:#aab0bb;font-size:{small}px;letter-spacing:1px;")
             pnl.sub.setStyleSheet(f"background:transparent;color:#aab0bb;font-size:{small}px;")
@@ -108,4 +108,15 @@ class StreamWindow(QWidget):
         self.today.value.setText(fmt_delta(s.today_net))
         self.today.value.setStyleSheet(self.today.value.styleSheet() + f"color:{rp_color(s.today_net)};")
         g = s.goal
-        self.today.sub.setText("GOAL DONE" if g.reached else f"GOAL +{g.goal:,}  ({int(g.fraction * 100)}%)")
+        ss = s.session
+        if g.reached:
+            self.today.sub.setText("GOAL DONE")
+        elif ss is not None and ss.state == "live":
+            tail = f"BEATEN +{ss.over:,}" if ss.over > 0 else f"{int(ss.fraction * 100)}%"
+            self.today.sub.setText(f"SESSION {fmt_delta(ss.net)} / +{ss.goal:,}  {tail}")
+        elif g.beaten and g.next_goal is not None:
+            self.today.sub.setText(f"GOAL BEATEN +{g.over:,}  NEW GOAL +{g.next_goal:,}")
+        elif g.beaten:
+            self.today.sub.setText(f"GOAL BEATEN +{g.over:,}")
+        else:
+            self.today.sub.setText(f"GOAL +{g.goal:,}  ({int(g.fraction * 100)}%)")
