@@ -4,9 +4,13 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 
 from .db import Database
-from .goals import GoalInfo, daily_goal
+from .goals import GoalInfo, average_gain, daily_goal
 from .ranks import (DEFAULT_ENTRY_COSTS, DEFAULT_LADDER, SEASON_LABEL, RankInfo, rank_for,
                     target_options, validate_ladder)
+
+# Your RP from the in-game screen: Gold II, 307 RP into a 750 RP division, 443 RP to Gold I
+# (Gold II starts at 7,000, so 7,000 + 307). New databases start here.
+DEFAULT_START_RP = 7307
 
 DEFAULT_NOTE = (f"Default ladder for {SEASON_LABEL}, taken from guides (not from the game). "
                 "Two guides put Gold IV at 5,250 instead of 5,500 - confirm in game.")
@@ -27,6 +31,8 @@ class Snapshot:
     entry_cost: int
     thresholds_verified: bool
     thresholds_note: str
+    avg_per_day: int | None = None    # usual RP per played day (None until a match is logged)
+    avg_days: int = 0                 # how many days that average is over
 
 
 class Tracker:
@@ -34,7 +40,17 @@ class Tracker:
         self.db = db
         d = db.get_setting
         if d("start_rp") is None:
-            db.set_setting("start_rp", 0)
+            db.set_setting("start_rp", DEFAULT_START_RP)
+        if d("seeded_v5") is None:
+            # A v4 database that was never filled in (0 RP, no matches) gets your RP once.
+            # Anything you already entered is left exactly as it is.
+            if int(d("start_rp")) == 0 and db.match_count() == 0:
+                db.set_setting("start_rp", DEFAULT_START_RP)
+            db.set_setting("seeded_v5", "1")
+        if d("seeded_v6") is None:
+            # v6: you said your RP is 7,307 now. Applied once; your match history is kept.
+            self.set_current_rp(DEFAULT_START_RP)
+            db.set_setting("seeded_v6", "1")
         if d("season_end") is None:
             db.set_setting("season_end", (date.today() + timedelta(days=60)).isoformat())
         if d("ladder") is None:   # new key: older versions stored a coarser table under "thresholds"
@@ -45,8 +61,8 @@ class Tracker:
             db.set_setting("entry_costs", json.dumps(DEFAULT_ENTRY_COSTS))
         if d("target_label") is None:
             db.set_setting("target_label", "Diamond IV")
-        if d("setup_done") is None:
-            db.set_setting("setup_done", "0")
+        if d("setup_done") != "1":              # no welcome screen: everything has a sensible default
+            db.set_setting("setup_done", "1")
 
     # ---- settings accessors -------------------------------------------
     @property
@@ -105,6 +121,7 @@ class Tracker:
         net, count = self.db.day_total(today.isoformat())
         cur = self.current_rp()
         t_label, t_rp = self.resolve_target()
+        totals = self.db.daily_totals()
         return Snapshot(
             day=today, current_rp=cur, today_net=net, today_count=count,
             rank=rank_for(cur, self.ladder), target_label=t_label, target_rp=t_rp,
@@ -112,4 +129,5 @@ class Tracker:
             season_end=self.season_end, start_rp=self.start_rp,
             entry_cost=self.entry_costs.get(rank_for(cur, self.ladder).tier, 0),
             thresholds_verified=self.db.get_setting("thresholds_verified") == "1",
-            thresholds_note=self.db.get_setting("thresholds_note", ""))
+            thresholds_note=self.db.get_setting("thresholds_note", ""),
+            avg_per_day=average_gain(totals), avg_days=len(totals))

@@ -3,10 +3,10 @@ from datetime import date, datetime, timedelta
 import pytest
 
 from app.db import Database
-from app.goals import daily_goal
+from app.goals import average_gain, daily_goal
 from app.parsing import parse_rp
 from app.ranks import DEFAULT_ENTRY_COSTS, DEFAULT_LADDER, rank_for, target_options, tier_of, validate_ladder
-from app.tracker import Tracker
+from app.tracker import DEFAULT_START_RP, Tracker
 
 
 @pytest.fixture
@@ -113,3 +113,97 @@ def test_backup(tr, tmp_path):
     assert copy.total_delta() == 50
     copy.close()
     assert tr.db.has_backup_today(tmp_path / "bk")
+
+
+def test_new_database_starts_at_the_rp_from_the_screenshot(tr):
+    # Gold II, 307 RP into a 750 RP division, 443 RP to Gold I
+    assert DEFAULT_START_RP == 7307 and tr.current_rp() == 7307
+    r = tr.snapshot().rank
+    assert r.label == "Gold II" and r.next_label == "Gold I"
+    assert tr.current_rp() - r.start_rp == 307 and r.next_rp - r.start_rp == 750
+    assert r.next_rp - tr.current_rp() == 443
+    assert tr.db.get_setting("setup_done") == "1"          # no welcome screen
+
+
+def test_rp_survives_closing_and_reopening(tmp_path):
+    path = tmp_path / "keep.db"
+    db = Database(path)
+    t = Tracker(db)
+    t.db.add_match(-33)
+    t.set_current_rp(8123)
+    db.close()
+    db2 = Database(path)
+    t2 = Tracker(db2)                      # must not re-seed or reset anything
+    assert t2.current_rp() == 8123 and db2.match_count() == 1
+    db2.close()
+
+
+def test_v4_database_migration(tmp_path):
+    def v4_db(name, start, matches=0):
+        db = Database(tmp_path / name)     # a v4 database has no "seeded_v5" / "seeded_v6" key
+        db.set_setting("start_rp", start)
+        for _ in range(matches):
+            db.add_match(10)
+        return db
+
+    never_filled = v4_db("a.db", 0)
+    assert Tracker(never_filled).current_rp() == 7307            # untouched -> gets your RP once
+
+    entered = v4_db("b.db", 5000)
+    assert Tracker(entered).current_rp() == 7307                 # v6: your RP is set to 7,307 once
+
+    used = v4_db("c.db", 0, matches=3)
+    assert Tracker(used).current_rp() == 7307                    # history kept, total set to 7,307
+    assert used.match_count() == 3 and used.total_delta() == 30
+
+    never_filled.set_setting("start_rp", 0)
+    assert Tracker(never_filled).current_rp() == 0               # seeds only once, never again
+    entered.set_setting("start_rp", 5000)
+    assert Tracker(entered).current_rp() == 5000                 # your own number is not replaced again
+    for d in (never_filled, entered, used):
+        d.close()
+
+
+def test_recent_matches_numbers_and_running_total(tr):
+    db = tr.db
+    t0 = datetime(2026, 11, 9, 20, 0)
+    plan = [(0, 100), (30, -40), (60 * 5, 25), (60 * 24, 70), (60 * 24 + 5, -33)]
+    for minutes, delta in plan:
+        db.add_match(delta, f"m{delta}", when=t0 + timedelta(minutes=minutes))
+    rows = db.recent_matches()
+    assert [m.delta for m, _, _ in rows] == [-33, 70, 25, -40, 100]          # newest first
+    # 9 Nov: +100, -40   10 Nov: +25, +70, -33   (numbered within their own day)
+    assert [n for _, n, _ in rows] == [3, 2, 1, 2, 1]
+    assert [run for _, _, run in rows] == [122, 155, 85, 60, 100]            # running total after each
+    assert [m.delta for m, _, _ in db.recent_matches(2)] == [-33, 70]
+    assert db.match_count() == 5
+
+
+def test_beating_the_goal_lowers_the_goal_per_day():
+    today = date(2026, 11, 10)
+    end = today + timedelta(days=9)                # 10 days left including today
+    g0 = daily_goal(1000, 0, 2000, end, today)
+    assert g0.goal == 100 and g0.over == 0 and not g0.beaten
+    assert g0.next_goal == 112                     # 1000 left / 9 days, rounded up
+    g1 = daily_goal(1100, 100, 2000, end, today)   # exactly on goal: not beaten yet
+    assert g1.goal == 100 and g1.over == 0 and g1.next_goal == 100
+    g2 = daily_goal(1250, 250, 2000, end, today)   # 150 more than the goal
+    assert g2.goal == 100 and g2.over == 150 and g2.beaten
+    assert g2.next_goal == 84 and g2.next_goal < g0.next_goal      # 750 left / 9 days
+    # what the card promises for tomorrow is what the dashboard shows after midnight
+    tomorrow = daily_goal(1250, 0, 2000, end, today + timedelta(days=1))
+    assert tomorrow.goal == g2.next_goal
+    last = daily_goal(1250, 250, 2000, today, today)               # last season day: no "tomorrow"
+    assert last.next_goal is None and last.goal == 1000
+
+
+def test_usual_gain_per_day_follows_big_days(tr):
+    assert average_gain([]) is None
+    assert average_gain([("2026-11-10", 3, 200), ("2026-11-09", 2, 100)]) == 150
+    assert tr.snapshot().avg_per_day is None
+    tr.db.add_match(100, when=datetime(2026, 11, 9, 20, 0))
+    tr.db.add_match(100, when=datetime(2026, 11, 10, 20, 0))
+    s = tr.snapshot(date(2026, 11, 10))
+    assert s.avg_per_day == 100 and s.avg_days == 2
+    tr.db.add_match(300, when=datetime(2026, 11, 10, 21, 0))       # a big day
+    assert tr.snapshot(date(2026, 11, 10)).avg_per_day == 250

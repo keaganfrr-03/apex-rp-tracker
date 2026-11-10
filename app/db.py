@@ -69,6 +69,25 @@ class Database:
         q += " ORDER BY played_at, id"
         return [_row(r) for r in self.conn.execute(q, args)]
 
+    def recent_matches(self, limit: int | None = None):
+        """Newest first: [(Match, number_of_that_day, running_total_after_it)].
+
+        One SQL query does the numbering and the running total, so the screen never has to
+        load and add up every match in Python just to show the latest ten.
+        """
+        q = ("SELECT id, played_at, day, delta, note, n, run FROM ("
+             " SELECT *, ROW_NUMBER() OVER (PARTITION BY day ORDER BY played_at, id) AS n,"
+             "        SUM(delta) OVER (ORDER BY played_at, id) AS run FROM matches)"
+             " ORDER BY played_at DESC, id DESC")
+        args = ()
+        if limit:
+            q += " LIMIT ?"
+            args = (int(limit),)
+        return [(_row(r), r["n"], r["run"]) for r in self.conn.execute(q, args)]
+
+    def match_count(self) -> int:
+        return self.conn.execute("SELECT COUNT(*) FROM matches").fetchone()[0]
+
     def last_match(self):
         r = self.conn.execute("SELECT * FROM matches ORDER BY played_at DESC, id DESC LIMIT 1").fetchone()
         return _row(r) if r else None
