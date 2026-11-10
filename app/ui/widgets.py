@@ -68,26 +68,20 @@ def make_table(headers):
     return t
 
 
-def fill_matches(table, matches, start_rp, limit=None):
-    """Newest first. Shows match number of the day, time, RP change and RP after."""
-    running, per_day, rows = start_rp, {}, []
-    for m in matches:
-        running += m.delta
-        per_day[m.day] = per_day.get(m.day, 0) + 1
-        rows.append((m, per_day[m.day], running))
-    rows.reverse()
-    if limit:
-        rows = rows[:limit]
+def fill_matches(table, rows, start_rp):
+    """rows come from Database.recent_matches(): newest first, (match, number of the day, running total)."""
+    table.setUpdatesEnabled(False)
     table.setRowCount(len(rows))
-    for r, (m, n, after) in enumerate(rows):
+    for r, (m, n, run) in enumerate(rows):
         cells = [colored_item(m.played_at.strftime("%a %d %b"), align=Qt.AlignLeft),
                  colored_item(f"#{n}  {m.played_at:%H:%M}", align=Qt.AlignLeft),
                  colored_item(fmt_delta(m.delta), rp_color(m.delta)),
-                 colored_item(f"{after:,}"),
+                 colored_item(f"{start_rp + run:,}"),
                  colored_item(m.note, align=Qt.AlignLeft)]
         for c, it in enumerate(cells):
             table.setItem(r, c, it)
         table.item(r, 0).setData(Qt.UserRole, m.id)
+    table.setUpdatesEnabled(True)
 
 
 def selected_match_id(table):

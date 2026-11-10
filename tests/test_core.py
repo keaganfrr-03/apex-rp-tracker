@@ -6,7 +6,7 @@ from app.db import Database
 from app.goals import daily_goal
 from app.parsing import parse_rp
 from app.ranks import DEFAULT_ENTRY_COSTS, DEFAULT_LADDER, rank_for, target_options, tier_of, validate_ladder
-from app.tracker import Tracker
+from app.tracker import DEFAULT_START_RP, Tracker
 
 
 @pytest.fixture
@@ -113,3 +113,64 @@ def test_backup(tr, tmp_path):
     assert copy.total_delta() == 50
     copy.close()
     assert tr.db.has_backup_today(tmp_path / "bk")
+
+
+def test_new_database_starts_at_the_rp_from_the_screenshot(tr):
+    # Gold II, 140 RP into a 750 RP division, 610 RP to Gold I
+    assert DEFAULT_START_RP == 7140 and tr.current_rp() == 7140
+    r = tr.snapshot().rank
+    assert r.label == "Gold II" and r.next_label == "Gold I"
+    assert tr.current_rp() - r.start_rp == 140 and r.next_rp - r.start_rp == 750
+    assert r.next_rp - tr.current_rp() == 610
+    assert tr.db.get_setting("setup_done") == "1"          # no welcome screen
+
+
+def test_rp_survives_closing_and_reopening(tmp_path):
+    path = tmp_path / "keep.db"
+    db = Database(path)
+    t = Tracker(db)
+    t.db.add_match(-33)
+    t.set_current_rp(8123)
+    db.close()
+    db2 = Database(path)
+    t2 = Tracker(db2)                      # must not re-seed or reset anything
+    assert t2.current_rp() == 8123 and db2.match_count() == 1
+    db2.close()
+
+
+def test_v4_database_migration(tmp_path):
+    def v4_db(name, start, matches=0):
+        db = Database(tmp_path / name)     # a v4 database has no "seeded_v5" key
+        db.set_setting("start_rp", start)
+        for _ in range(matches):
+            db.add_match(10)
+        return db
+
+    never_filled = v4_db("a.db", 0)
+    assert Tracker(never_filled).current_rp() == 7140            # untouched -> gets your RP once
+
+    entered = v4_db("b.db", 5000)
+    assert Tracker(entered).current_rp() == 5000                 # your own number is never replaced
+
+    used = v4_db("c.db", 0, matches=3)
+    assert Tracker(used).current_rp() == 30                      # has history -> left alone
+
+    never_filled.set_setting("start_rp", 0)
+    assert Tracker(never_filled).current_rp() == 0               # seeds only once, never again
+    for d in (never_filled, entered, used):
+        d.close()
+
+
+def test_recent_matches_numbers_and_running_total(tr):
+    db = tr.db
+    t0 = datetime(2026, 11, 9, 20, 0)
+    plan = [(0, 100), (30, -40), (60 * 5, 25), (60 * 24, 70), (60 * 24 + 5, -33)]
+    for minutes, delta in plan:
+        db.add_match(delta, f"m{delta}", when=t0 + timedelta(minutes=minutes))
+    rows = db.recent_matches()
+    assert [m.delta for m, _, _ in rows] == [-33, 70, 25, -40, 100]          # newest first
+    # 9 Nov: +100, -40   10 Nov: +25, +70, -33   (numbered within their own day)
+    assert [n for _, n, _ in rows] == [3, 2, 1, 2, 1]
+    assert [run for _, _, run in rows] == [122, 155, 85, 60, 100]            # running total after each
+    assert [m.delta for m, _, _ in db.recent_matches(2)] == [-33, 70]
+    assert db.match_count() == 5

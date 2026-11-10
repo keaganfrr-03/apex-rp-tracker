@@ -11,10 +11,9 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDateEdit, QFormLayout, QHB
 from .. import paths
 from ..db import Database
 from ..parsing import parse_rp
-from ..ranks import target_options
+from ..ranks import target_options, validate_ladder
 from ..tracker import Tracker
-from .theme import AMBER, GREEN, NEUTRAL, STYLE, fmt_delta, rp_color
-from .stream import StreamWindow
+from .theme import GREEN, STYLE, fmt_delta, rp_color
 from .widgets import (CalculatorDialog, Card, EditMatchDialog, RankHero, colored_item, fill_matches, make_bar, make_table,
                       selected_match_id, set_bar)
 
@@ -38,10 +37,6 @@ class Dashboard(QWidget):
         stream.clicked.connect(self.win.open_stream)
         head.addWidget(stream)
         root.addLayout(head)
-        self.warn = QLabel("")
-        self.warn.setObjectName("warn")
-        self.warn.setWordWrap(True)
-        root.addWidget(self.warn)
 
         self.hero = RankHero()
         root.addWidget(self.hero)
@@ -138,8 +133,6 @@ class Dashboard(QWidget):
 
     def refresh(self, s):
         self.date_lbl.setText(s.day.strftime("%A %d %B %Y"))
-        self.warn.setText("" if s.thresholds_verified else
-                          "Rank ladder not confirmed in game yet. Check it in Settings. " + s.thresholds_note)
         self.c_rp.set(f"{s.current_rp:,}", s.rank.label)
         self.c_today.set(fmt_delta(s.today_net), f"{s.today_count} matches today", rp_color(s.today_net))
         g = s.goal
@@ -155,7 +148,7 @@ class Dashboard(QWidget):
         self.hero.set(s, last.delta if last else None)
         set_bar(self.bar_target, s.current_rp / s.target_rp if s.target_rp else 1.0,
                 f"{s.current_rp:,} / {s.target_rp:,}")
-        fill_matches(self.table, self.win.tracker.db.list_matches(), s.start_rp, limit=10)
+        fill_matches(self.table, self.win.tracker.db.recent_matches(10), s.start_rp)
 
 
 class History(QWidget):
@@ -202,7 +195,7 @@ class History(QWidget):
             self.win.refresh()
 
     def refresh(self, s):
-        fill_matches(self.table, self.win.tracker.db.list_matches(), s.start_rp)
+        fill_matches(self.table, self.win.tracker.db.recent_matches(), s.start_rp)
         totals = self.win.tracker.db.daily_totals()
         self.days.setRowCount(len(totals))
         for r, (day, n, net) in enumerate(totals):
@@ -219,12 +212,13 @@ class Settings(QWidget):
         form = QFormLayout()
         self.start = QSpinBox()
         self.start.setRange(0, 100000)
-        self.start.setToolTip("Your RP before the first match you logged.")
+        self.start.setToolTip("Your RP right now. Only change this if it does not match the game.")
+        self._synced_rp = 0
         self.target = QComboBox()
         self.season_end = QDateEdit()
         self.season_end.setCalendarPopup(True)
         self.season_end.setDisplayFormat("yyyy-MM-dd")
-        form.addRow("Starting RP (before first logged match)", self.start)
+        form.addRow("Current RP (change only if it is wrong)", self.start)
         form.addRow("Target rank", self.target)
         form.addRow("Season end date", self.season_end)
         root.addLayout(form)
@@ -265,6 +259,15 @@ class Settings(QWidget):
         root.addWidget(self.msg)
         self.load()
 
+    def sync_rp(self, rp):
+        """Keep the box equal to the real RP, so saving other settings can never overwrite it."""
+        if self.start.hasFocus():
+            return
+        self.start.blockSignals(True)
+        self.start.setValue(int(rp))
+        self.start.blockSignals(False)
+        self._synced_rp = int(rp)
+
     def _fill_targets(self, ladder, selected):
         self.target.clear()
         for label, rp in target_options(ladder):
@@ -300,7 +303,7 @@ class Settings(QWidget):
 
     def load(self):
         t = self.win.tracker
-        self.start.setValue(t.start_rp)
+        self.sync_rp(t.current_rp())
         self.season_end.setDate(QDate(t.season_end.year, t.season_end.month, t.season_end.day))
         self._fill_ladder(t.ladder)
         self._fill_targets(t.ladder, t.db.get_setting("target_label"))
@@ -335,11 +338,16 @@ class Settings(QWidget):
     def save(self):
         try:
             ladder = self._read_ladder()
-            self.win.tracker.save_settings(
-                start_rp=self.start.value(), season_end=self.season_end.date().toPython(),
+            costs = self._read_costs()
+            validate_ladder(ladder)
+            t = self.win.tracker
+            if self.start.value() != self._synced_rp:      # only touch RP if you actually changed it
+                t.set_current_rp(self.start.value())
+            t.save_settings(
+                start_rp=t.start_rp, season_end=self.season_end.date().toPython(),
                 target_label=self.target.currentData() or "", ladder=ladder,
                 note=self.thr_note.text(), verified=self.verified.isChecked(),
-                entry_costs=self._read_costs())
+                entry_costs=costs)
         except ValueError as e:
             QMessageBox.warning(self, "Check the settings", str(e))
             return
@@ -353,20 +361,21 @@ class Settings(QWidget):
         self.load()
 
     def backup(self):
-        p = self.win.tracker.db.backup(paths.backup_dir())
+        p = self.win.tracker.db.backup(self.win.backup_dir)
         self.msg.setText(f"Backup saved: {p}")
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, db_file=None, first_run_prompt=True):
+    def __init__(self, db_file=None):
         super().__init__()
-        self.setWindowTitle("Apex RP Tracker v4")
+        self.setWindowTitle("Apex RP Tracker v5")
         self.resize(1040, 900)
         self.setStyleSheet(STYLE)
         self.db = Database(db_file or paths.db_path())
         self.tracker = Tracker(self.db)
-        if not self.db.has_backup_today(paths.backup_dir() if db_file is None else self.db.path.parent / "backups"):
-            self.db.backup(paths.backup_dir() if db_file is None else self.db.path.parent / "backups")
+        self.backup_dir = paths.backup_dir() if db_file is None else self.db.path.parent / "backups"
+        if not self.db.has_backup_today(self.backup_dir):
+            self.db.backup(self.backup_dir)
 
         self.dash, self.hist, self.sett = Dashboard(self), History(self), Settings(self)
         self.tabs = QTabWidget()
@@ -377,34 +386,28 @@ class MainWindow(QMainWindow):
 
         self.stream = None
         self._day = datetime.now().date()
-        self.timer = QTimer(self)             # notices midnight and rolls "today" over
+        self.timer = QTimer(self)             # only wakes up to notice midnight and roll "today" over
         self.timer.timeout.connect(self._tick)
-        self.timer.start(15000)
+        self.timer.start(30000)
         self.refresh()
-        if first_run_prompt and self.db.get_setting("setup_done") != "1":
-            QTimer.singleShot(0, self._first_run)
-
-    def _first_run(self):
-        self.tabs.setCurrentWidget(self.sett)
-        QMessageBox.information(self, "Welcome",
-                                "Set your starting RP, target rank and season end date, then check the "
-                                "rank thresholds against the game and click Save.")
 
     def _tick(self):
         today = datetime.now().date()
         if today != self._day:
             self._day = today
-        self.refresh()
+            self.refresh()
 
     def refresh(self):
         s = self.tracker.snapshot(datetime.now().date())
         self.dash.refresh(s)
         self.hist.refresh(s)
+        self.sett.sync_rp(s.current_rp)
         if self.stream is not None:
             self.stream.refresh(s)
 
     def open_stream(self):
         if self.stream is None:
+            from .stream import StreamWindow      # loaded on first use, keeps start-up quick
             self.stream = StreamWindow()
         self.stream.refresh(self.tracker.snapshot(datetime.now().date()))
         self.stream.show()

@@ -8,6 +8,10 @@ from .goals import GoalInfo, daily_goal
 from .ranks import (DEFAULT_ENTRY_COSTS, DEFAULT_LADDER, SEASON_LABEL, RankInfo, rank_for,
                     target_options, validate_ladder)
 
+# Your RP from the in-game screen: Gold II, 140 RP into a 750 RP division, 610 RP to Gold I
+# (Gold II starts at 7,000, so 7,000 + 140). New databases start here.
+DEFAULT_START_RP = 7140
+
 DEFAULT_NOTE = (f"Default ladder for {SEASON_LABEL}, taken from guides (not from the game). "
                 "Two guides put Gold IV at 5,250 instead of 5,500 - confirm in game.")
 
@@ -34,7 +38,13 @@ class Tracker:
         self.db = db
         d = db.get_setting
         if d("start_rp") is None:
-            db.set_setting("start_rp", 0)
+            db.set_setting("start_rp", DEFAULT_START_RP)
+        if d("seeded_v5") is None:
+            # A v4 database that was never filled in (0 RP, no matches) gets your RP once.
+            # Anything you already entered is left exactly as it is.
+            if int(d("start_rp")) == 0 and db.match_count() == 0:
+                db.set_setting("start_rp", DEFAULT_START_RP)
+            db.set_setting("seeded_v5", "1")
         if d("season_end") is None:
             db.set_setting("season_end", (date.today() + timedelta(days=60)).isoformat())
         if d("ladder") is None:   # new key: older versions stored a coarser table under "thresholds"
@@ -45,8 +55,8 @@ class Tracker:
             db.set_setting("entry_costs", json.dumps(DEFAULT_ENTRY_COSTS))
         if d("target_label") is None:
             db.set_setting("target_label", "Diamond IV")
-        if d("setup_done") is None:
-            db.set_setting("setup_done", "0")
+        if d("setup_done") != "1":              # no welcome screen: everything has a sensible default
+            db.set_setting("setup_done", "1")
 
     # ---- settings accessors -------------------------------------------
     @property

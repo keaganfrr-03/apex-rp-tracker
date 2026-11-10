@@ -9,10 +9,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with: { python-version: "3.12", cache: pip, cache-dependency-path: "requirements*.txt" }
       - run: pip install -r requirements-dev.txt
       - run: python -m pytest -q tests
         env: { QT_QPA_PLATFORM: offscreen }
-      - run: pyinstaller --noconfirm --clean --windowed --name ApexRPTracker main.py
+      - name: Build exe
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --clean --windowed --log-level WARN --name ApexRPTracker \
+            --exclude-module tkinter \
+            --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets --exclude-module PySide6.QtWebEngineQuick \
+            --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick --exclude-module PySide6.QtQuickWidgets --exclude-module PySide6.QtQuick3D \
+            --exclude-module PySide6.Qt3DCore --exclude-module PySide6.QtMultimedia --exclude-module PySide6.QtMultimediaWidgets \
+            --exclude-module PySide6.QtCharts --exclude-module PySide6.QtDataVisualization --exclude-module PySide6.QtPdf \
+            --exclude-module PySide6.QtPdfWidgets --exclude-module PySide6.QtSql \
+            main.py
       - uses: actions/upload-artifact@v4
         with: { name: ApexRPTracker-windows, path: dist/ApexRPTracker }
