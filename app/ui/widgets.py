@@ -5,6 +5,8 @@ from PySide6.QtWidgets import (QSpinBox, QPushButton, QHBoxLayout, QDateTimeEdit
                                QTableWidgetItem, QVBoxLayout, QAbstractItemView, QHeaderView)
 
 from ..calc import match_net
+from ..ranks import split_label
+from .badges import badge_pixmap, tier_color
 from ..parsing import parse_rp
 from .theme import NEUTRAL, fmt_delta, rp_color
 
@@ -42,7 +44,7 @@ def set_bar(bar, fraction, fmt=None, color=None):
     bar.setValue(int(max(0.0, min(1.0, fraction)) * 1000))
     if fmt is not None:
         bar.setFormat(fmt)
-    c = color or "#3b82f6"
+    c = color or "#e8453c"
     bar.setStyleSheet(f"QProgressBar::chunk {{ background:{c}; border-radius:6px; }}")
 
 
@@ -167,3 +169,71 @@ class CalculatorDialog(QDialog):
         n = self.net()
         self.total.setText(fmt_delta(n))
         self.total.setStyleSheet(f"font-size:22px;font-weight:600;color:{rp_color(n)};")
+
+
+class RankHero(QFrame):
+    """Like the in-game ranked screen: badge, last match RP, bar, next badge."""
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("hero")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(18, 12, 18, 12)
+        row.setSpacing(18)
+        self.cur = QLabel()
+        self.cur.setFixedSize(112, 112)
+        mid = QVBoxLayout()
+        mid.setSpacing(2)
+        self.big = QLabel("-")
+        self.big.setObjectName("heroBig")
+        self.caption = QLabel("")
+        self.caption.setObjectName("heroCaption")
+        self.bar = make_bar("")
+        bl = QHBoxLayout()
+        self.left, self.right = QLabel(""), QLabel("")
+        self.right.setAlignment(Qt.AlignRight)
+        bl.addWidget(self.left)
+        bl.addWidget(self.right)
+        mid.addWidget(self.big)
+        mid.addWidget(self.caption)
+        mid.addSpacing(4)
+        mid.addWidget(self.bar)
+        mid.addLayout(bl)
+        right = QVBoxLayout()
+        self.nxt = QLabel()
+        self.nxt.setFixedSize(84, 84)
+        self.to_next = QLabel("")
+        self.to_next.setAlignment(Qt.AlignCenter)
+        right.addWidget(self.nxt, 0, Qt.AlignCenter)
+        right.addWidget(self.to_next)
+        row.addWidget(self.cur)
+        row.addLayout(mid, 1)
+        row.addLayout(right)
+
+    def set(self, s, last_delta):
+        r = s.rank
+        self.cur.setPixmap(badge_pixmap(r.tier, r.division, 112))
+        if last_delta is None:
+            self.big.setText("-")
+            self.big.setStyleSheet("")
+            self.caption.setText("NO MATCHES LOGGED YET")
+        else:
+            self.big.setText(fmt_delta(last_delta))
+            self.big.setStyleSheet(f"color:{rp_color(last_delta)};")
+            self.caption.setText("RANKED POINTS GAINED" if last_delta > 0 else
+                                 "RANKED POINTS LOST" if last_delta < 0 else "NO RP CHANGE")
+        color = tier_color(r.tier)
+        if r.next_rp:
+            into, size = s.current_rp - r.start_rp, r.next_rp - r.start_rp
+            set_bar(self.bar, r.fraction, "", color)
+            self.left.setText(f"{into:,} RP")
+            self.right.setText(f"{size:,} RP")
+            nt, nd = split_label(r.next_label)
+            self.nxt.setPixmap(badge_pixmap(nt, nd, 84))
+            self.to_next.setText(f"<span style='color:{color};font-size:18px;font-weight:600'>"
+                                 f"{r.next_rp - s.current_rp:,} RP</span> &#9654; {r.next_label.upper()}")
+        else:
+            set_bar(self.bar, 1.0, "", color)
+            self.left.setText(f"{s.current_rp - r.start_rp:,} RP into Master")
+            self.right.setText("")
+            self.nxt.clear()
+            self.to_next.setText("TOP RANK")

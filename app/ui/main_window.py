@@ -14,7 +14,8 @@ from ..parsing import parse_rp
 from ..ranks import target_options
 from ..tracker import Tracker
 from .theme import AMBER, GREEN, NEUTRAL, STYLE, fmt_delta, rp_color
-from .widgets import (CalculatorDialog, Card, EditMatchDialog, colored_item, fill_matches, make_bar, make_table,
+from .stream import StreamWindow
+from .widgets import (CalculatorDialog, Card, EditMatchDialog, RankHero, colored_item, fill_matches, make_bar, make_table,
                       selected_match_id, set_bar)
 
 
@@ -33,11 +34,17 @@ class Dashboard(QWidget):
         head.addWidget(title)
         head.addStretch()
         head.addWidget(self.date_lbl)
+        stream = QPushButton("Stream mode")
+        stream.clicked.connect(self.win.open_stream)
+        head.addWidget(stream)
         root.addLayout(head)
         self.warn = QLabel("")
         self.warn.setObjectName("warn")
         self.warn.setWordWrap(True)
         root.addWidget(self.warn)
+
+        self.hero = RankHero()
+        root.addWidget(self.hero)
 
         grid = QGridLayout()
         grid.setSpacing(10)
@@ -47,9 +54,8 @@ class Dashboard(QWidget):
             grid.addWidget(c, 0, i)
         root.addLayout(grid)
 
-        self.bar_goal, self.bar_div, self.bar_target = make_bar(), make_bar(), make_bar()
-        for text, bar in (("Today's goal", self.bar_goal), ("Progress in current rank", self.bar_div),
-                          ("Progress to target", self.bar_target)):
+        self.bar_goal, self.bar_target = make_bar(), make_bar()
+        for text, bar in (("Today's goal", self.bar_goal), ("Progress to target", self.bar_target)):
             row = QHBoxLayout()
             lbl = QLabel(text)
             lbl.setFixedWidth(170)
@@ -59,7 +65,8 @@ class Dashboard(QWidget):
 
         entry = QHBoxLayout()
         self.delta = QLineEdit()
-        self.delta.setPlaceholderText("RP change, e.g. +125 or -45")
+        self.delta.setPlaceholderText("+125 or -45")
+        self.delta.setMinimumWidth(170)
         self.delta.setStyleSheet("font-size:18px;padding:9px 11px;")
         self.delta.returnPressed.connect(self.add)
         self.note = QLineEdit()
@@ -144,9 +151,8 @@ class Dashboard(QWidget):
         set_bar(self.bar_goal, g.fraction,
                 f"{fmt_delta(s.today_net)} / +{g.goal:,}" if not g.reached else "Target reached",
                 GREEN if g.fraction >= 1 else None)
-        r = s.rank
-        set_bar(self.bar_div, r.fraction,
-                f"{s.current_rp:,} / {r.next_rp:,}" if r.next_rp else "Top rank")
+        last = self.win.tracker.db.last_match()
+        self.hero.set(s, last.delta if last else None)
         set_bar(self.bar_target, s.current_rp / s.target_rp if s.target_rp else 1.0,
                 f"{s.current_rp:,} / {s.target_rp:,}")
         fill_matches(self.table, self.win.tracker.db.list_matches(), s.start_rp, limit=10)
@@ -354,8 +360,8 @@ class Settings(QWidget):
 class MainWindow(QMainWindow):
     def __init__(self, db_file=None, first_run_prompt=True):
         super().__init__()
-        self.setWindowTitle("Apex RP Tracker v3")
-        self.resize(1000, 760)
+        self.setWindowTitle("Apex RP Tracker v4")
+        self.resize(1040, 900)
         self.setStyleSheet(STYLE)
         self.db = Database(db_file or paths.db_path())
         self.tracker = Tracker(self.db)
@@ -369,6 +375,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.sett, "Settings")
         self.setCentralWidget(self.tabs)
 
+        self.stream = None
         self._day = datetime.now().date()
         self.timer = QTimer(self)             # notices midnight and rolls "today" over
         self.timer.timeout.connect(self._tick)
@@ -393,6 +400,15 @@ class MainWindow(QMainWindow):
         s = self.tracker.snapshot(datetime.now().date())
         self.dash.refresh(s)
         self.hist.refresh(s)
+        if self.stream is not None:
+            self.stream.refresh(s)
+
+    def open_stream(self):
+        if self.stream is None:
+            self.stream = StreamWindow()
+        self.stream.refresh(self.tracker.snapshot(datetime.now().date()))
+        self.stream.show()
+        self.stream.raise_()
 
     def edit_match(self, match_id):
         if match_id is None:
@@ -407,5 +423,7 @@ class MainWindow(QMainWindow):
             self.refresh()
 
     def closeEvent(self, e):
+        if self.stream is not None:
+            self.stream.close()
         self.db.close()
         super().closeEvent(e)

@@ -37,6 +37,7 @@ class RankInfo:
     start_rp: int          # RP where this division starts
     next_rp: int | None    # RP where the next division starts (None at the top)
     fraction: float        # 0..1 progress through this division
+    next_label: str = ""   # name of the next division, e.g. "Gold I"
 
 
 def tier_of(label: str) -> str:
@@ -66,7 +67,14 @@ def rank_for(rp, ladder=DEFAULT_LADDER) -> RankInfo:
     if idx == len(ladder) - 1:
         return RankInfo(tier, div, label, start, None, 1.0)
     nxt = ladder[idx + 1][1]
-    return RankInfo(tier, div, label, start, nxt, max(0.0, min(1.0, (rp - start) / (nxt - start))))
+    return RankInfo(tier, div, label, start, nxt,
+                    max(0.0, min(1.0, (rp - start) / (nxt - start))), ladder[idx + 1][0])
+
+
+def split_label(label: str):
+    """'Gold II' -> ('Gold', 'II'); 'Master' -> ('Master', '')."""
+    tier = tier_of(label)
+    return tier, label[len(tier):].strip()
 
 
 def target_options(ladder=DEFAULT_LADDER):

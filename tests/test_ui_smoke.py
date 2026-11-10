@@ -60,3 +60,35 @@ def test_calculator_adds_match(qapp, tmp_path):
     assert w.tracker.snapshot().entry_cost == 38 and w.tracker.snapshot().rank.label == "Gold II"
     assert CalculatorDialog(entry_cost=38).fields["entry"].value() == 38
     w.close()
+
+
+def test_badges_hero_and_stream(qapp, tmp_path, monkeypatch):
+    from app.ui import badges
+    monkeypatch.setenv("APEX_RP_DATA_DIR", str(tmp_path / "data"))
+    badges.clear_cache()
+    for tier, div in (("Rookie", "IV"), ("Gold", "II"), ("Platinum", "I"), ("Diamond", "III"), ("Master", "")):
+        pm = badges.badge_pixmap(tier, div, 96)
+        assert pm.width() == 96 and not pm.isNull()
+    # a user-supplied PNG is used instead of the drawn badge
+    (tmp_path / "data" / "badges").mkdir(parents=True)
+    drawn = badges.badge_pixmap("Gold", "II", 64).toImage()
+    custom = badges.QPixmap(64, 64)
+    custom.fill(badges.QColor("#ff00ff"))
+    custom.save(str(tmp_path / "data" / "badges" / "gold_ii.png"))
+    badges.clear_cache()
+    assert badges.badge_pixmap("Gold", "II", 64).toImage().pixelColor(32, 32).name() == "#ff00ff"
+    badges.clear_cache()
+
+    w = MainWindow(db_file=tmp_path / "v4.db", first_run_prompt=False)
+    w.tracker.set_current_rp(7173)       # Gold II, 173 into a 750 RP division
+    w.db.add_match(-33)
+    w.open_stream()
+    w.refresh()
+    assert w.dash.hero.left.text() == "140 RP" and w.dash.hero.right.text() == "750 RP"
+    assert "610" in w.dash.hero.to_next.text() and "GOLD I" in w.dash.hero.to_next.text()
+    assert w.dash.hero.big.text() == "-33"
+    assert w.stream.today.value.text() == "-33" and "GOLD II" in w.stream.cur.sub.text()
+    assert w.stream.windowFlags() & badges.Qt.WindowStaysOnTopHint
+    w.stream.resize(400, 80)
+    w.stream.set_flag(badges.Qt.FramelessWindowHint, True)
+    w.close()
