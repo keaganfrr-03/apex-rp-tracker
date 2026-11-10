@@ -1,0 +1,18 @@
+name: Build Windows exe
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.12" }
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q tests
+        env: { QT_QPA_PLATFORM: offscreen }
+      - run: pyinstaller --noconfirm --clean --windowed --name ApexRPTracker main.py
+      - uses: actions/upload-artifact@v4
+        with: { name: ApexRPTracker-windows, path: dist/ApexRPTracker }
